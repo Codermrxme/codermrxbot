@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import pymongo
 import threading
 import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Load env
 load_dotenv()
@@ -320,6 +321,31 @@ def broadcast_message(chat_id, text, data):
         except Exception as e2:
             print(f"Fallback send_message xatosi: {e2}")
 
+# Simple HTTP server similar to Express example
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/' or self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(b'Hello World!')
+        elif self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def run_health_server(port):
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        print(f"Health server listening on 0.0.0.0:{port}")
+        server.serve_forever()
+    except Exception as e:
+        print(f"Health server error: {e}")
+
 def process_message(update, data):
     try:
         message = update.get('message') or {}
@@ -587,6 +613,15 @@ def process_message(update, data):
 def main():
     data = load_data()
     last_update_id = None
+
+    # Start HTTP health server (like Express example). Use PORT env or 8000 default.
+    try:
+        port = int(os.environ.get('PORT', '8000'))
+    except Exception:
+        port = 8000
+    t = threading.Thread(target=run_health_server, args=(port,), daemon=True)
+    t.start()
+
     print("Bot ishga tushdi...")
     while True:
         try:
