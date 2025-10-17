@@ -418,7 +418,7 @@ def process_message(update, data):
                 save_data(data)
                 return data
             if text == "📋 Adminlar ro'yxati":
-                admins_list = "\n".join([f"👤 {data['users'].get(str(a), {}).get('first_name','Noma\\lum')} (ID: {a})" for a in data['admins']])
+                admins_list = "\n".join([f"👤 {data['users'].get(str(a), {}).get('first_name','Nomalum')} (ID: {a})" for a in data['admins']])
                 send_message(chat_id, f"Adminlar ro'yxati:\n\n{admins_list}")
                 return data
             if text == "➕ Kanal qo'shish":
@@ -965,7 +965,7 @@ def process_message(update, data):
                 save_data(data)
                 return data
             if text == "📋 Adminlar ro'yxati":
-                admins_list = "\n".join([f"👤 {data['users'].get(str(a), {}).get('first_name','Noma\\lum')} (ID: {a})" for a in data['admins']])
+                admins_list = "\n".join([f"👤 {data['users'].get(str(a), {}).get('first_name','Nomalum')} (ID: {a})" for a in data['admins']])
                 send_message(chat_id, f"Adminlar ro'yxati:\n\n{admins_list}")
                 return data
             if text == "➕ Kanal qo'shish":

@@ -4,19 +4,19 @@ ENV PYTHONUNBUFFERED=1 DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
-# kerakli paketlar (xz-utils -> update-alternatives lzma ogohlantirishlarini kamaytiradi)
+# install system deps; man-db qo'shilsa update-alternatives ogohlantirishlari kamayadi
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential xz-utils && \
+    apt-get install -y --no-install-recommends build-essential xz-utils man-db && \
     rm -rf /var/lib/apt/lists/*
 
 # dependencies
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# kodni qo'shish va kerak bo'lsa huquqni sozlash
+# kodni qo'shish va huquqni sozlash
 COPY . /app
 
-# ixtiyoriy: non-root foydalanuvchi yaratish (agar xohlasangiz)
+# non-root user yaratish va ishlatish
 RUN useradd --create-home --shell /bin/bash appuser && chown -R appuser:appuser /app
 USER appuser
 
