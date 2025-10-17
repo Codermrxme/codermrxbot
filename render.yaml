@@ -1,0 +1,25 @@
+services:
+  - type: web
+    plan: free
+    name: Codermrx Bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    repo: https://github.com/Codermrxme/codermrxbot
+    branch: main
+    autoDeploy: false
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: MONGO_DB
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: MAIN_ADMIN
+        sync: false
+      - key: WEB_SUPPORT
+        sync: false

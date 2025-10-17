@@ -1,0 +1,24 @@
+# Python fayllari
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual muhit
+venv/
+.env
+.env.local
+
+# Ma'lumotlar bazasi
+*.db
+*.sqlite
+*.xlsx
+
+# IDE
+.idea/
+.vscode/
+*.swp
+/data/
+
+# Tizim
+.DS_Store
+Thumbs.db
