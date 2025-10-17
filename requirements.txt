@@ -4,3 +4,4 @@ pandas==1.5.3
 python-dotenv==0.21.0
 openpyxl==3.0.10
 numpy==2.3.4
+requests==2.31.0
