@@ -1,19 +1,13 @@
-# ...existing code...
+# Build image and run main.py
 FROM python:3.11-slim
-
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
-# Kerak bo'lsa C-kompilyator paketlari (pandas uchun)
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Kodni konteynerga nusxalash
-COPY . /app
-
-# Python dependencylarni o'rnatish
+COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Ishga tushirish
+COPY . /app
 CMD ["python", "main.py"]
-# ...existing code...
