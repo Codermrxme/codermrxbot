@@ -26,13 +26,16 @@ BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
 MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017')
 MONGO_DB = os.getenv('MONGO_DB', 'codermrxbot')
 
-# Connect to MongoDB
-mongo_client = pymongo.MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB]
-users_col = db['users']
-channels_col = db['channels']
-admins_col = db['admins']
-messages_col = db['messages']
+# Connect to MongoDB (best-effort; code works without DB if connection fails)
+try:
+    mongo_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    db = mongo_client[MONGO_DB]
+    users_col = db['users']
+    channels_col = db['channels']
+    admins_col = db['admins']
+    messages_col = db['messages']
+except Exception:
+    users_col = channels_col = admins_col = messages_col = None
 
 # folders & legacy files
 os.makedirs('data', exist_ok=True)
@@ -42,6 +45,7 @@ USERS_FILE = 'data/users.json'
 CHANNELS_FILE = 'data/channels.json'
 ADMINS_FILE = 'data/admins.json'
 MESSAGES_FILE = 'data/messages.json'
+LAST_OFFSET_FILE = 'data/last_offset.txt'
 
 DEFAULT_DATA = {
     'users': {},
@@ -57,7 +61,7 @@ def safe_load_json(filename, default):
             if isinstance(data, type(default)):
                 return data
             return default
-    except (FileNotFoundError, json.JSONDecodeError, TypeError):
+    except Exception:
         return default
 
 def save_json(data, filename):
@@ -68,107 +72,130 @@ def save_json(data, filename):
         print(f"Faylga yozishda xato: {e}")
 
 def load_data():
-    users = {}
+    data = {'users': {}, 'channels': {}, 'admins': [], 'messages': []}
+    # load users
     try:
-        for doc in users_col.find():
-            uid = str(doc.get('id') or doc.get('_id'))
-            users[uid] = {
-                'id': int(doc.get('id')) if doc.get('id') is not None else int(uid),
-                'first_name': doc.get('first_name', ''),
-                'last_name': doc.get('last_name', ''),
-                'username': doc.get('username', ''),
-                'phone': doc.get('phone', ''),
-                'joined': doc.get('joined', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')),
-                'last_active': doc.get('last_active', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')),
-                'message_count': int(doc.get('message_count', 0)),
-                'is_admin': bool(doc.get('is_admin', False))
-            }
+        if users_col:
+            for doc in users_col.find():
+                uid = str(doc.get('id') or doc.get('_id'))
+                data['users'][uid] = {
+                    'id': int(doc.get('id')) if doc.get('id') is not None else int(uid),
+                    'first_name': doc.get('first_name', ''),
+                    'last_name': doc.get('last_name', ''),
+                    'username': doc.get('username', ''),
+                    'phone': doc.get('phone', ''),
+                    'joined': doc.get('joined', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')),
+                    'last_active': doc.get('last_active', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')),
+                    'message_count': int(doc.get('message_count', 0)),
+                    'is_admin': bool(doc.get('is_admin', False))
+                }
+        else:
+            data['users'] = safe_load_json(USERS_FILE, DEFAULT_DATA['users'])
     except Exception as e:
         print(f"DB dan users yuklashda xato: {e}")
-        users = safe_load_json(USERS_FILE, DEFAULT_DATA['users'])
+        data['users'] = safe_load_json(USERS_FILE, DEFAULT_DATA['users'])
 
-    channels = {}
+    # load channels
     try:
-        for doc in channels_col.find():
-            key = doc.get('username') or str(doc.get('_id'))
-            channels[key] = {
-                'username': doc.get('username', key),
-                'name': doc.get('name', key),
-                'added_by': doc.get('added_by'),
-                'added_date': doc.get('added_date')
-            }
+        if channels_col:
+            for doc in channels_col.find():
+                key = doc.get('username') or str(doc.get('_id'))
+                data['channels'][key] = {
+                    'username': doc.get('username', key),
+                    'name': doc.get('name', key),
+                    'added_by': doc.get('added_by'),
+                    'added_date': doc.get('added_date')
+                }
+        else:
+            data['channels'] = safe_load_json(CHANNELS_FILE, DEFAULT_DATA['channels'])
     except Exception as e:
         print(f"DB dan channels yuklashda xato: {e}")
-        channels = safe_load_json(CHANNELS_FILE, DEFAULT_DATA['channels'])
+        data['channels'] = safe_load_json(CHANNELS_FILE, DEFAULT_DATA['channels'])
 
-    admins = []
+    # load admins
     try:
-        for doc in admins_col.find():
-            aid = doc.get('admin_id')
-            if aid is not None:
-                try:
-                    admins.append(int(aid))
-                except Exception:
-                    pass
+        if admins_col:
+            for doc in admins_col.find():
+                aid = doc.get('admin_id')
+                if aid is not None:
+                    try:
+                        data['admins'].append(int(aid))
+                    except Exception:
+                        pass
+        else:
+            data['admins'] = safe_load_json(ADMINS_FILE, DEFAULT_DATA['admins'])
     except Exception as e:
         print(f"DB dan admins yuklashda xato: {e}")
-        admins = safe_load_json(ADMINS_FILE, DEFAULT_DATA['admins'])
+        data['admins'] = safe_load_json(ADMINS_FILE, DEFAULT_DATA['admins'])
 
-    messages = []
+    # load recent messages
     try:
-        for m in messages_col.find().sort('date', -1).limit(50):
-            messages.append({
-                'user_id': m.get('user_id'),
-                'message_id': m.get('message_id'),
-                'text': m.get('text'),
-                'date': m.get('date').strftime('%Y-%m-%d %H:%M:%S') if isinstance(m.get('date'), datetime) else m.get('date')
-            })
+        if messages_col:
+            for m in messages_col.find().sort('date', -1).limit(50):
+                data['messages'].append({
+                    'user_id': m.get('user_id'),
+                    'message_id': m.get('message_id'),
+                    'text': m.get('text'),
+                    'date': m.get('date').strftime('%Y-%m-%d %H:%M:%S') if isinstance(m.get('date'), datetime) else m.get('date')
+                })
+        else:
+            data['messages'] = safe_load_json(MESSAGES_FILE, DEFAULT_DATA['messages'])
     except Exception:
-        messages = []
+        data['messages'] = []
 
-    if MAIN_ADMIN and MAIN_ADMIN not in admins:
+    if MAIN_ADMIN and MAIN_ADMIN not in data['admins']:
+        data['admins'].append(MAIN_ADMIN)
         try:
-            admins_col.update_one({'admin_id': MAIN_ADMIN}, {'$set': {'admin_id': MAIN_ADMIN}}, upsert=True)
-            admins.append(MAIN_ADMIN)
+            if admins_col:
+                admins_col.update_one({'admin_id': MAIN_ADMIN}, {'$set': {'admin_id': MAIN_ADMIN}}, upsert=True)
         except Exception as e:
             print(f"Asosiy adminni DBga qo'shishda xato: {e}")
 
-    return {'users': users, 'channels': channels, 'admins': admins, 'messages': messages}
+    return data
 
 def save_data(data):
     try:
-        for uid, u in data['users'].items():
-            users_col.update_one({'id': int(u['id'])}, {'$set': {
-                'id': int(u['id']),
-                'first_name': u.get('first_name', ''),
-                'last_name': u.get('last_name', ''),
-                'username': u.get('username', ''),
-                'phone': u.get('phone', ''),
-                'joined': u.get('joined', ''),
-                'last_active': u.get('last_active', ''),
-                'message_count': int(u.get('message_count', 0)),
-                'is_admin': bool(u.get('is_admin', False))
-            }}, upsert=True)
+        if users_col:
+            for uid, u in data['users'].items():
+                users_col.update_one({'id': int(u['id'])}, {'$set': {
+                    'id': int(u['id']),
+                    'first_name': u.get('first_name', ''),
+                    'last_name': u.get('last_name', ''),
+                    'username': u.get('username', ''),
+                    'phone': u.get('phone', ''),
+                    'joined': u.get('joined', ''),
+                    'last_active': u.get('last_active', ''),
+                    'message_count': int(u.get('message_count', 0)),
+                    'is_admin': bool(u.get('is_admin', False))
+                }}, upsert=True)
+        else:
+            save_json(data['users'], USERS_FILE)
     except Exception as e:
         print(f"Users DBga saqlashda xato: {e}")
         save_json(data['users'], USERS_FILE)
 
     try:
-        for key, c in data['channels'].items():
-            channels_col.update_one({'username': c.get('username', key)}, {'$set': {
-                'username': c.get('username', key),
-                'name': c.get('name', key),
-                'added_by': c.get('added_by'),
-                'added_date': c.get('added_date')
-            }}, upsert=True)
+        if channels_col:
+            for key, c in data['channels'].items():
+                channels_col.update_one({'username': c.get('username', key)}, {'$set': {
+                    'username': c.get('username', key),
+                    'name': c.get('name', key),
+                    'added_by': c.get('added_by'),
+                    'added_date': c.get('added_date')
+                }}, upsert=True)
+        else:
+            save_json(data['channels'], CHANNELS_FILE)
     except Exception as e:
         print(f"Channels DBga saqlashda xato: {e}")
         save_json(data['channels'], CHANNELS_FILE)
 
     try:
-        admins_col.delete_many({})
-        for a in data['admins']:
-            admins_col.insert_one({'admin_id': int(a)})
+        if admins_col:
+            admins_col.delete_many({})
+            for a in data['admins']:
+                admins_col.insert_one({'admin_id': int(a)})
+        else:
+            save_json(data['admins'], ADMINS_FILE)
     except Exception as e:
         print(f"Admins DBga saqlashda xato: {e}")
         save_json(data['admins'], ADMINS_FILE)
@@ -181,18 +208,18 @@ def save_data(data):
 def send_message(chat_id, text, reply_markup=None):
     try:
         url = BASE_URL + "sendMessage"
-        params = {'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'}
+        payload = {'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'}
         if reply_markup:
-            params['reply_markup'] = json.dumps(reply_markup)
-        requests.post(url, json=params, timeout=10)
+            payload['reply_markup'] = json.dumps(reply_markup)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Xabar yuborishda xato: {e}")
 
 def forward_message(chat_id, from_chat_id, message_id):
     try:
         url = BASE_URL + "forwardMessage"
-        params = {'chat_id': chat_id, 'from_chat_id': from_chat_id, 'message_id': message_id}
-        requests.post(url, json=params, timeout=10)
+        payload = {'chat_id': chat_id, 'from_chat_id': from_chat_id, 'message_id': message_id}
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Xabarni yo'naltirishda xato: {e}")
 
@@ -203,6 +230,9 @@ def get_updates(offset=None):
         if offset is not None:
             params['offset'] = offset
         response = requests.get(url, params=params, timeout=35)
+        if response.status_code != 200:
+            print("getUpdates http status:", response.status_code)
+            return []
         return response.json().get('result', [])
     except Exception as e:
         print(f"Yangiliklarni olishda xato: {e}")
@@ -240,11 +270,11 @@ def channels_management_menu():
 
 def get_stats(data):
     try:
-        total_users = users_col.count_documents({})
+        total_users = users_col.count_documents({}) if users_col else len(data['users'])
     except Exception:
         total_users = len(data['users'])
     try:
-        total_messages = messages_col.count_documents({})
+        total_messages = messages_col.count_documents({}) if messages_col else len(data.get('messages', []))
     except Exception:
         total_messages = len(data.get('messages', []))
     total_admins = len(data['admins'])
@@ -298,7 +328,7 @@ def export_users_to_excel(chat_id, data):
 def broadcast_message(chat_id, text, data):
     try:
         try:
-            total = users_col.count_documents({})
+            total = users_col.count_documents({}) if users_col else len(data['users'])
         except Exception:
             total = len(data['users'])
         send_message(chat_id, f"📣 Xabar {total} foydalanuvchiga yuborilmoqda...")
@@ -321,14 +351,14 @@ def broadcast_message(chat_id, text, data):
         except Exception as e2:
             print(f"Fallback send_message xatosi: {e2}")
 
-# Simple HTTP server similar to Express example
+# Simple HTTP server like Express: '/' -> Hello World!, '/health' -> OK
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/' or self.path == '/':
+        if self.path == '/':
             self.send_response(200)
             self.send_header('Content-Type', 'text/plain; charset=utf-8')
             self.end_headers()
-            self.wfile.write(b'Hello World!')
+            self.wfile.write(b'CoderMrx Bot is running!')
         elif self.path == '/health':
             self.send_response(200)
             self.send_header('Content-Type', 'text/plain; charset=utf-8')
@@ -345,6 +375,28 @@ def run_health_server(port):
         server.serve_forever()
     except Exception as e:
         print(f"Health server error: {e}")
+
+def load_next_offset():
+    try:
+        with open(LAST_OFFSET_FILE, 'r') as f:
+            v = f.read().strip()
+            return int(v) if v else None
+    except Exception:
+        return None
+
+def save_next_offset(offset):
+    try:
+        with open(LAST_OFFSET_FILE, 'w') as f:
+            f.write(str(int(offset)) if offset is not None else '')
+    except Exception as e:
+        print(f"Offset saqlash xato: {e}")
+
+def ensure_no_webhook():
+    try:
+        requests.get(BASE_URL + "deleteWebhook", timeout=10)
+        print("deleteWebhook called")
+    except Exception as e:
+        print(f"deleteWebhook xatosi: {e}")
 
 def process_message(update, data):
     try:
@@ -375,8 +427,11 @@ def process_message(update, data):
             data['users'][user_id_str]['message_count'] = data['users'][user_id_str].get('message_count', 0) + 1
 
         try:
-            msg_doc = {'user_id': user_id, 'message_id': message_id, 'text': text, 'date': datetime.utcnow()}
-            messages_col.insert_one(msg_doc)
+            if messages_col:
+                msg_doc = {'user_id': user_id, 'message_id': message_id, 'text': text, 'date': datetime.utcnow()}
+                messages_col.insert_one(msg_doc)
+            else:
+                data['messages'].append({'user_id': user_id, 'message_id': message_id, 'text': text, 'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
         except Exception as e:
             print(f"Xabarni DBga yozishda xato: {e}")
             data['messages'].append({'user_id': user_id, 'message_id': message_id, 'text': text, 'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
@@ -385,11 +440,10 @@ def process_message(update, data):
         if text == "/restart" and user_id in data['admins']:
             send_message(chat_id, "🔄 Bot restart qilinmoqda...")
             save_data(data)
-            # kichik kechikish, keyin chiqamiz (PaaS qayta ishga tushiradi)
             threading.Timer(1.0, lambda: os._exit(0)).start()
             return data
 
-        # /start
+        # start
         if text == "/start":
             if user_id in data['admins']:
                 send_message(chat_id, "👋 Admin paneliga xush kelibsiz!", reply_markup=admin_menu())
@@ -423,7 +477,7 @@ def process_message(update, data):
             send_message(chat_id, "ℹ️ Yordam:\n\nAgar savollaringiz bo'lsa, @codermrxbot ga yozishingiz mumkin.")
             return data
 
-        # Admin section
+        # Admin actions
         if user_id in data['admins']:
             if text == "📊 Statistika":
                 send_message(chat_id, get_stats(data))
@@ -432,7 +486,6 @@ def process_message(update, data):
                 export_users_to_excel(chat_id, data)
                 return data
             if text == "📣 Hammaga xabar":
-                # show cancel button
                 send_message(chat_id, "📣 Hammaga yuboriladigan xabarni yozing yoki Bekor qilishni bosing:", reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
                 data['users'][user_id_str]['awaiting_broadcast'] = True
                 save_data(data)
@@ -472,7 +525,7 @@ def process_message(update, data):
                 send_message(chat_id, f"Kanallar ro'yxati:\n\n{channels_list or 'Kanallar mavjud emas'}", reply_markup=admin_menu())
                 return data
 
-            # awaiting actions handlers (with cancel)
+            # awaiting handlers with cancel
             if data['users'][user_id_str].get('awaiting_broadcast'):
                 if text in ("Bekor qilish", "🔙 Admin paneli"):
                     data['users'][user_id_str].pop('awaiting_broadcast', None)
@@ -495,8 +548,8 @@ def process_message(update, data):
                     new_admin = int(text)
                     if new_admin not in data['admins']:
                         data['admins'].append(new_admin)
-                        users_col.update_one({'id': new_admin}, {'$set': {'is_admin': True}})
-                        admins_col.update_one({'admin_id': new_admin}, {'$set': {'admin_id': new_admin}}, upsert=True)
+                        if users_col: users_col.update_one({'id': new_admin}, {'$set': {'is_admin': True}})
+                        if admins_col: admins_col.update_one({'admin_id': new_admin}, {'$set': {'admin_id': new_admin}}, upsert=True)
                         send_message(chat_id, f"✅ {new_admin} admin qilindi", reply_markup=admin_menu())
                     else:
                         send_message(chat_id, "⚠️ Bu foydalanuvchi allaqachon admin", reply_markup=admin_menu())
@@ -516,8 +569,8 @@ def process_message(update, data):
                     rem_admin = int(text)
                     if rem_admin in data['admins'] and rem_admin != MAIN_ADMIN:
                         data['admins'].remove(rem_admin)
-                        users_col.update_one({'id': rem_admin}, {'$set': {'is_admin': False}})
-                        admins_col.delete_one({'admin_id': rem_admin})
+                        if users_col: users_col.update_one({'id': rem_admin}, {'$set': {'is_admin': False}})
+                        if admins_col: admins_col.delete_one({'admin_id': rem_admin})
                         send_message(chat_id, f"✅ {rem_admin} adminlikdan olindi", reply_markup=admin_menu())
                     else:
                         send_message(chat_id, "❌ Admin topilmadi yoki asosiy adminni o'chirib bo'lmaydi", reply_markup=admin_menu())
@@ -540,18 +593,12 @@ def process_message(update, data):
                 if ident.isdigit():
                     key = ident
                     channel_doc = {'id': int(ident), 'name': name, 'added_by': user_id, 'added_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-                    try:
-                        channels_col.update_one({'id': channel_doc['id']}, {'$set': channel_doc}, upsert=True)
-                    except Exception as e:
-                        print(f"Channels DB saqlash xato (id): {e}")
+                    if channels_col: channels_col.update_one({'id': channel_doc['id']}, {'$set': channel_doc}, upsert=True)
                 else:
                     username = ident.lstrip('@')
                     key = username
                     channel_doc = {'username': username, 'name': name, 'added_by': user_id, 'added_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-                    try:
-                        channels_col.update_one({'username': username}, {'$set': channel_doc}, upsert=True)
-                    except Exception as e:
-                        print(f"Channels DB saqlash xato (username): {e}")
+                    if channels_col: channels_col.update_one({'username': username}, {'$set': channel_doc}, upsert=True)
                 data['channels'][str(key)] = channel_doc
                 data['users'][user_id_str].pop('awaiting_channel_add', None)
                 send_message(chat_id, f"✅ Kanal qo'shildi: {name} ({ident})", reply_markup=admin_menu())
@@ -571,12 +618,12 @@ def process_message(update, data):
                     for k, v in list(data['channels'].items()):
                         if str(v.get('id', '')) == ch_ident or k == ch_ident:
                             del data['channels'][k]
-                            channels_col.delete_one({'id': int(ch_ident)})
+                            if channels_col: channels_col.delete_one({'id': int(ch_ident)})
                             removed = True
                 else:
                     if ch_ident in data['channels']:
                         del data['channels'][ch_ident]
-                        channels_col.delete_one({'username': ch_ident})
+                        if channels_col: channels_col.delete_one({'username': ch_ident})
                         removed = True
                 if removed:
                     send_message(chat_id, f"✅ {ch_ident} o'chirildi", reply_markup=admin_menu())
@@ -585,7 +632,7 @@ def process_message(update, data):
                 save_data(data)
                 return data
 
-        # Non-admin messages forwarded to admins
+        # Forward non-admin messages to admins (single forwarding)
         if user_id not in data['admins']:
             for admin_id in data['admins']:
                 try:
@@ -612,9 +659,15 @@ def process_message(update, data):
 
 def main():
     data = load_data()
-    last_update_id = None
 
-    # Start HTTP health server (like Express example). Use PORT env or 8000 default.
+    # remove webhook to avoid duplicates
+    ensure_no_webhook()
+
+    # load persistent offset
+    next_offset = load_next_offset()
+    print("Loaded next_offset:", next_offset)
+
+    # Start HTTP health server (like Express). Use PORT env or 8000 default.
     try:
         port = int(os.environ.get('PORT', '8000'))
     except Exception:
@@ -622,17 +675,48 @@ def main():
     t = threading.Thread(target=run_health_server, args=(port,), daemon=True)
     t.start()
 
-    print("Bot ishga tushdi...")
+    # Optional self-ping to KEEP_ALIVE_URL (won't bypass provider policies)
+    keep_alive_url = os.environ.get('KEEP_ALIVE_URL')
+    try:
+        keep_alive_interval = int(os.environ.get('KEEP_ALIVE_INTERVAL', '300'))
+    except Exception:
+        keep_alive_interval = 300
+    if keep_alive_url:
+        kt = threading.Thread(target=lambda: (requests.get(keep_alive_url) if keep_alive_url else None) and None, daemon=True)
+        # simple periodic ping thread
+        def ping_loop(url, interval):
+            while True:
+                try:
+                    requests.get(url, timeout=10)
+                except Exception as e:
+                    print("Keep-alive ping error:", e)
+                time.sleep(interval)
+        if keep_alive_url:
+            kt = threading.Thread(target=ping_loop, args=(keep_alive_url, keep_alive_interval), daemon=True)
+            kt.start()
+
+    print("Bot ishga tushdi... 🚀")
     while True:
         try:
-            updates = get_updates(last_update_id)
+            updates = get_updates(next_offset)
             for update in updates:
-                last_update_id = update['update_id'] + 1
+                uid = update.get('update_id')
+                if uid is None:
+                    continue
+                # skip already processed updates
+                if next_offset is not None and uid < next_offset:
+                    continue
+                # process
                 data = process_message(update, data)
+                # set next_offset to last update_id + 1
+                next_offset = uid + 1
+                save_next_offset(next_offset)
             save_data(data)
+            # short sleep to avoid busy-loop if no updates
+            time.sleep(0.2)
         except Exception as e:
             print(f"Asosiy tsiklda xato: {e}")
-            time.sleep(5)
+            time.sleep(3)
 
 if __name__ == '__main__':
     main()
