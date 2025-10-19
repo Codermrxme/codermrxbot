@@ -365,21 +365,23 @@ def broadcast_message(chat_id, text, data):
         
         for user_id in list(data['users'].keys()):
             try:
-                if int(user_id) not in data['admins']:
+                if int(user_id) not in data['admins']:  # Adminlarga yubormaymiz
                     if send_message(int(user_id), text):
                         success += 1
                     else:
                         failed += 1
-                    time.sleep(0.1)
-            except Exception:
+                    time.sleep(0.1)  # Rate limit
+            except Exception as e:
+                print(f"Xabar yuborishda xato user {user_id}: {e}")
                 failed += 1
         
         send_message(chat_id, 
-                    f"📣 Xabar yuborish yakunlandi!\n\n"
-                    f"✅ Muvaffaqiyatli: {success}\n"
-                    f"❌ Xatolar: {failed}", 
+                    f"📣 <b>Xabar yuborish yakunlandi!</b>\n\n"
+                    f"✅ <b>Muvaffaqiyatli:</b> {success}\n"
+                    f"❌ <b>Xatolar:</b> {failed}", 
                     reply_markup=admin_menu())
-    except Exception:
+    except Exception as e:
+        print(f"Broadcast xatosi: {e}")
         send_message(chat_id, "❌ Xabar tarqatishda xatolik yuz berdi!")
 
 # Soddalashtirilgan Health server
@@ -555,6 +557,8 @@ def process_message(update, data):
                             "Yoki <b>Bekor qilish</b> tugmasini bosing", 
                             reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
                 data['users'][user_id_str]['awaiting_broadcast'] = True
+                save_data(data)  # Darhol saqlaymiz
+                return data
             
             elif text == "👨‍💻 Adminlar":
                 send_message(chat_id, "👨‍💻 <b>Adminlar boshqaruvi:</b>", reply_markup=admins_management_menu())
@@ -568,6 +572,8 @@ def process_message(update, data):
                             "Yoki <b>Bekor qilish</b> tugmasini bosing", 
                             reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
                 data['users'][user_id_str]['awaiting_admin_add'] = True
+                save_data(data)
+                return data
             
             elif text == "➖ Admin o'chirish":
                 send_message(chat_id, 
@@ -575,6 +581,8 @@ def process_message(update, data):
                             "Yoki <b>Bekor qilish</b> tugmasini bosing", 
                             reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
                 data['users'][user_id_str]['awaiting_admin_remove'] = True
+                save_data(data)
+                return data
             
             elif text == "📋 Adminlar ro'yxati":
                 if data['admins']:
@@ -597,6 +605,8 @@ def process_message(update, data):
                             "Yoki <b>Bekor qilish</b> tugmasini bosing", 
                             reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
                 data['users'][user_id_str]['awaiting_channel_add'] = True
+                save_data(data)
+                return data
             
             elif text == "➖ Kanal o'chirish":
                 send_message(chat_id, 
@@ -604,6 +614,8 @@ def process_message(update, data):
                             "Yoki <b>Bekor qilish</b> tugmasini bosing", 
                             reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
                 data['users'][user_id_str]['awaiting_channel_remove'] = True
+                save_data(data)
+                return data
             
             elif text == "📋 Kanallar ro'yxati":
                 if data['channels']:
@@ -619,14 +631,17 @@ def process_message(update, data):
             # Awaiting handlers for admin actions
             user_data = data['users'].get(user_id_str, {})
             
-            # Broadcast message handler
+            # Broadcast message handler - BU YERDA MUHIM
             if user_data.get('awaiting_broadcast'):
                 if text in ("Bekor qilish", "🔙 Admin paneli"):
                     user_data.pop('awaiting_broadcast', None)
                     send_message(chat_id, "❌ Xabar yuborish bekor qilindi", reply_markup=admin_menu())
+                    save_data(data)
                 else:
                     user_data.pop('awaiting_broadcast', None)
+                    save_data(data)  # Avval saqlaymiz
                     broadcast_message(chat_id, text, data)
+                return data
             
             # Add admin handler
             elif user_data.get('awaiting_admin_add'):
@@ -644,6 +659,8 @@ def process_message(update, data):
                     except ValueError:
                         send_message(chat_id, "❌ Noto'g'ri ID format", reply_markup=admin_menu())
                     user_data.pop('awaiting_admin_add', None)
+                save_data(data)
+                return data
             
             # Remove admin handler
             elif user_data.get('awaiting_admin_remove'):
@@ -661,6 +678,8 @@ def process_message(update, data):
                     except ValueError:
                         send_message(chat_id, "❌ Noto'g'ri ID format", reply_markup=admin_menu())
                     user_data.pop('awaiting_admin_remove', None)
+                save_data(data)
+                return data
             
             # Add channel handler
             elif user_data.get('awaiting_channel_add'):
@@ -684,6 +703,8 @@ def process_message(update, data):
                                    reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
                         return data
                     user_data.pop('awaiting_channel_add', None)
+                save_data(data)
+                return data
             
             # Remove channel handler
             elif user_data.get('awaiting_channel_remove'):
@@ -698,6 +719,8 @@ def process_message(update, data):
                     else:
                         send_message(chat_id, "❌ Kanal topilmadi", reply_markup=admin_menu())
                     user_data.pop('awaiting_channel_remove', None)
+                save_data(data)
+                return data
 
         # Non-admin xabarlarni adminlarga yuborish
         if user_id not in data['admins'] and text and not text.startswith('/'):
