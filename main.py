@@ -7,14 +7,20 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 import pymongo
 import threading
-import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import logging
+
+# Log sozlamalari - faqat muhim loglar
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
 
 # Load env
 load_dotenv()
 TOKEN = os.getenv('BOT_TOKEN')
 if not TOKEN:
-    raise SystemExit("BOT_TOKEN not set in .env")
+    print("❌ BOT_TOKEN not set")
+    exit(1)
+
 try:
     MAIN_ADMIN = int(os.getenv('MAIN_ADMIN')) if os.getenv('MAIN_ADMIN') else None
 except Exception:
@@ -30,17 +36,14 @@ MONGO_DB = os.getenv('MONGO_DB', 'codermrxbot')
 TASHKENT_TZ = timezone(timedelta(hours=5))
 
 def get_tashkent_time():
-    """Toshkent vaqtini qaytaradi"""
     return datetime.now(TASHKENT_TZ)
 
 def format_tashkent_time(dt=None):
-    """Toshkent vaqtini formatlab qaytaradi"""
     if dt is None:
         dt = get_tashkent_time()
     return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 def format_uptime(seconds):
-    """Uptime ni formatlab qaytaradi"""
     days = seconds // (24 * 3600)
     seconds %= (24 * 3600)
     hours = seconds // 3600
@@ -63,23 +66,26 @@ def format_uptime(seconds):
 # Bot ishga tushgan vaqti
 BOT_START_TIME = get_tashkent_time()
 
-# MongoDB connection status
+# Global o'zgaruvchilar
 mongo_connected = False
-users_col = channels_col = admins_col = messages_col = None
+users_col = channels_col = None
 
-try:
-    mongo_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-    mongo_client.admin.command('ping')
-    mongo_connected = True
-    db = mongo_client[MONGO_DB]
-    users_col = db['users']
-    channels_col = db['channels']
-    admins_col = db['admins']
-    messages_col = db['messages']
-except Exception:
-    mongo_connected = False
+# MongoDB ulanish
+def init_mongodb():
+    global mongo_connected, users_col, channels_col
+    try:
+        mongo_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        mongo_client.admin.command('ping')
+        mongo_connected = True
+        db = mongo_client[MONGO_DB]
+        users_col = db['users']
+        channels_col = db['channels']
+        print("✅ MongoDB ga ulandi")
+    except Exception:
+        mongo_connected = False
+        print("❌ MongoDB ga ulanmadi")
 
-# folders & legacy files
+# Fayl tizimi
 os.makedirs('data', exist_ok=True)
 os.makedirs('exports', exist_ok=True)
 
@@ -113,13 +119,13 @@ def save_json(data, filename):
 def load_data():
     data = {'users': {}, 'channels': {}, 'admins': [], 'messages': []}
     
-    # Load users
+    # Users
     try:
         if mongo_connected and users_col is not None:
             for doc in users_col.find():
                 uid = str(doc.get('id') or doc.get('_id'))
                 data['users'][uid] = {
-                    'id': int(doc.get('id')) if doc.get('id') is not None else int(uid),
+                    'id': int(uid),
                     'first_name': doc.get('first_name', ''),
                     'last_name': doc.get('last_name', ''),
                     'username': doc.get('username', ''),
@@ -134,7 +140,7 @@ def load_data():
     except Exception:
         data['users'] = safe_load_json(USERS_FILE, DEFAULT_DATA['users'])
 
-    # Load channels
+    # Channels
     try:
         if mongo_connected and channels_col is not None:
             for doc in channels_col.find():
@@ -150,54 +156,24 @@ def load_data():
     except Exception:
         data['channels'] = safe_load_json(CHANNELS_FILE, DEFAULT_DATA['channels'])
 
-    # Load admins
-    try:
-        if mongo_connected and admins_col is not None:
-            for doc in admins_col.find():
-                aid = doc.get('admin_id')
-                if aid is not None:
-                    try:
-                        data['admins'].append(int(aid))
-                    except Exception:
-                        pass
-        else:
-            data['admins'] = safe_load_json(ADMINS_FILE, DEFAULT_DATA['admins'])
-    except Exception:
-        data['admins'] = safe_load_json(ADMINS_FILE, DEFAULT_DATA['admins'])
+    # Admins
+    data['admins'] = safe_load_json(ADMINS_FILE, DEFAULT_DATA['admins'])
+    
+    # Messages
+    data['messages'] = safe_load_json(MESSAGES_FILE, [])[-100:]
 
-    # Load messages
-    try:
-        if mongo_connected and messages_col is not None:
-            for m in messages_col.find().sort('date', -1).limit(100):
-                data['messages'].append({
-                    'user_id': m.get('user_id'),
-                    'message_id': m.get('message_id'),
-                    'text': m.get('text'),
-                    'date': m.get('date').strftime('%Y-%m-%d %H:%M:%S') if isinstance(m.get('date'), datetime) else m.get('date')
-                })
-        else:
-            data['messages'] = safe_load_json(MESSAGES_FILE, DEFAULT_DATA['messages'])[-100:]
-    except Exception:
-        data['messages'] = []
-
-    # Asosiy adminni qo'shish
     if MAIN_ADMIN and MAIN_ADMIN not in data['admins']:
         data['admins'].append(MAIN_ADMIN)
-        try:
-            if mongo_connected and admins_col is not None:
-                admins_col.update_one({'admin_id': MAIN_ADMIN}, {'$set': {'admin_id': MAIN_ADMIN}}, upsert=True)
-        except Exception:
-            pass
 
     return data
 
 def save_data(data):
-    # Users ni saqlash
+    # Users
     try:
         if mongo_connected and users_col is not None:
             for uid, u in data['users'].items():
-                users_col.update_one({'id': int(u['id'])}, {'$set': {
-                    'id': int(u['id']),
+                users_col.update_one({'id': int(uid)}, {'$set': {
+                    'id': int(uid),
                     'first_name': u.get('first_name', ''),
                     'last_name': u.get('last_name', ''),
                     'username': u.get('username', ''),
@@ -211,59 +187,38 @@ def save_data(data):
     except Exception:
         save_json(data['users'], USERS_FILE)
 
-    # Channels ni saqlash
+    # Channels
     try:
         if mongo_connected and channels_col is not None:
             for key, c in data['channels'].items():
-                if c.get('id'):
-                    channels_col.update_one({'id': c['id']}, {'$set': {
-                        'id': c['id'],
-                        'name': c.get('name', key),
-                        'added_by': c.get('added_by'),
-                        'added_date': c.get('added_date')
-                    }}, upsert=True)
-                else:
-                    channels_col.update_one({'username': c.get('username', key)}, {'$set': {
-                        'username': c.get('username', key),
-                        'name': c.get('name', key),
-                        'added_by': c.get('added_by'),
-                        'added_date': c.get('added_date')
-                    }}, upsert=True)
+                channels_col.update_one({'username': c.get('username', key)}, {'$set': {
+                    'username': c.get('username', key),
+                    'name': c.get('name', key),
+                    'added_by': c.get('added_by'),
+                    'added_date': c.get('added_date')
+                }}, upsert=True)
         save_json(data['channels'], CHANNELS_FILE)
     except Exception:
         save_json(data['channels'], CHANNELS_FILE)
 
-    # Admins ni saqlash
-    try:
-        if mongo_connected and admins_col is not None:
-            admins_col.delete_many({})
-            for a in data['admins']:
-                admins_col.insert_one({'admin_id': int(a)})
-        save_json(data['admins'], ADMINS_FILE)
-    except Exception:
-        save_json(data['admins'], ADMINS_FILE)
-
-    # Messages ni saqlash
-    try:
-        save_json(data.get('messages', [])[-200:], MESSAGES_FILE)
-    except Exception:
-        pass
+    # Admins
+    save_json(data['admins'], ADMINS_FILE)
+    
+    # Messages
+    save_json(data.get('messages', [])[-200:], MESSAGES_FILE)
 
 def send_message(chat_id, text, reply_markup=None):
     try:
         url = BASE_URL + "sendMessage"
-        payload = {'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'}
+        payload = {
+            'chat_id': chat_id, 
+            'text': text, 
+            'parse_mode': 'HTML',
+            'disable_web_page_preview': True
+        }
         if reply_markup:
             payload['reply_markup'] = json.dumps(reply_markup)
-        response = requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
-    except Exception:
-        return False
-
-def forward_message(chat_id, from_chat_id, message_id):
-    try:
-        url = BASE_URL + "forwardMessage"
-        payload = {'chat_id': chat_id, 'from_chat_id': from_chat_id, 'message_id': message_id}
+        
         response = requests.post(url, json=payload, timeout=10)
         return response.status_code == 200
     except Exception:
@@ -272,13 +227,17 @@ def forward_message(chat_id, from_chat_id, message_id):
 def get_updates(offset=None):
     try:
         url = BASE_URL + "getUpdates"
-        params = {'timeout': 30}
+        params = {
+            'timeout': 60,
+            'limit': 100,
+        }
         if offset is not None:
             params['offset'] = offset
-        response = requests.get(url, params=params, timeout=35)
-        if response.status_code != 200:
-            return []
-        return response.json().get('result', [])
+            
+        response = requests.get(url, params=params, timeout=65)
+        if response.status_code == 200:
+            return response.json().get('result', [])
+        return []
     except Exception:
         return []
 
@@ -294,7 +253,7 @@ def create_keyboard(buttons, row_width=2):
         keyboard.append(row)
     return {'keyboard': keyboard, 'resize_keyboard': True}
 
-def user_menu(is_admin: bool = False):
+def user_menu(is_admin=False):
     buttons = ["📢 Bizning kanallar", "💸 Donat", "ℹ️ Yordam"]
     if is_admin:
         buttons.append("🔙 Admin paneli")
@@ -302,95 +261,37 @@ def user_menu(is_admin: bool = False):
 
 def admin_menu():
     buttons = ["📊 Statistika", "👥 Userlar ro'yxati", "📣 Hammaga xabar", "👨‍💻 Adminlar", "📢 Kanallar", "🔙 Foydalanuvchi menyusi"]
-    return create_keyboard(buttons, row_width=2)
+    return create_keyboard(buttons, 2)
 
 def admins_management_menu():
     buttons = ["➕ Admin qo'shish", "➖ Admin o'chirish", "📋 Adminlar ro'yxati", "🔙 Admin paneli"]
-    return create_keyboard(buttons, row_width=2)
+    return create_keyboard(buttons, 2)
 
 def channels_management_menu():
     buttons = ["➕ Kanal qo'shish", "➖ Kanal o'chirish", "📋 Kanallar ro'yxati", "🔙 Admin paneli"]
-    return create_keyboard(buttons, row_width=2)
+    return create_keyboard(buttons, 2)
 
 def get_stats(data):
-    try:
-        if mongo_connected and users_col is not None:
-            total_users = users_col.count_documents({})
-        else:
-            total_users = len(data['users'])
-    except Exception:
-        total_users = len(data['users'])
+    total_users = len(data['users'])
+    total_messages = len(data.get('messages', []))
+    total_admins = len(data['admins'])
+    total_channels = len(data['channels'])
     
-    try:
-        if mongo_connected and messages_col is not None:
-            total_messages = messages_col.count_documents({})
-        else:
-            total_messages = len(data.get('messages', []))
-    except Exception:
-        total_messages = len(data.get('messages', []))
+    # Faol foydalanuvchilar (oxirgi 7 kun)
+    active_users = 0
+    one_week_ago = get_tashkent_time() - timedelta(days=7)
     
-    try:
-        if mongo_connected and admins_col is not None:
-            total_admins = admins_col.count_documents({})
-        else:
-            total_admins = len(data['admins'])
-    except Exception:
-        total_admins = len(data['admins'])
-    
-    try:
-        if mongo_connected and channels_col is not None:
-            total_channels = channels_col.count_documents({})
-        else:
-            total_channels = len(data['channels'])
-    except Exception:
-        total_channels = len(data['channels'])
-    
-    # Faol foydalanuvchilar (oxirgi 7 kun ichida faol bo'lganlar)
-    try:
-        active_users = 0
-        one_week_ago = get_tashkent_time() - timedelta(days=7)
-        
-        if mongo_connected and users_col is not None:
-            for user in users_col.find():
-                last_active = user.get('last_active', '')
-                if last_active:
-                    try:
-                        if isinstance(last_active, datetime):
-                            user_time = last_active.replace(tzinfo=TASHKENT_TZ)
-                        else:
-                            user_time = datetime.strptime(last_active, '%Y-%m-%d %H:%M:%S').replace(tzinfo=TASHKENT_TZ)
-                        
-                        if user_time >= one_week_ago:
-                            active_users += 1
-                    except Exception:
-                        continue
-        else:
-            for user in data['users'].values():
-                last_active = user.get('last_active', '')
-                if last_active:
-                    try:
-                        user_time = datetime.strptime(last_active, '%Y-%m-%d %H:%M:%S').replace(tzinfo=TASHKENT_TZ)
-                        if user_time >= one_week_ago:
-                            active_users += 1
-                    except Exception:
-                        continue
-    except Exception:
-        active_users = 0
+    for user in data['users'].values():
+        last_active = user.get('last_active', '')
+        if last_active:
+            try:
+                user_time = datetime.strptime(last_active, '%Y-%m-%d %H:%M:%S').replace(tzinfo=TASHKENT_TZ)
+                if user_time >= one_week_ago:
+                    active_users += 1
+            except Exception:
+                continue
 
-    # Oxirgi yangilanish vaqti (MongoDB dan)
-    last_update_time = "Noma'lum"
-    try:
-        if mongo_connected and messages_col is not None:
-            last_message = messages_col.find_one(sort=[('date', -1)])
-            if last_message and last_message.get('date'):
-                last_update_time = last_message['date'].strftime('%Y-%m-%d %H:%M:%S')
-        elif data.get('messages'):
-            last_message = max(data['messages'], key=lambda x: x.get('date', ''))
-            last_update_time = last_message.get('date', 'Noma\'lum')
-    except Exception:
-        pass
-
-    # Bot uptime
+    # Uptime hisoblash
     current_time = get_tashkent_time()
     uptime_seconds = int((current_time - BOT_START_TIME).total_seconds())
     uptime_str = format_uptime(uptime_seconds)
@@ -404,8 +305,7 @@ def get_stats(data):
         f"📢 <b>Kanallar:</b> {total_channels}\n\n"
         f"🕒 <b>Bot ishga tushgan vaqti:</b> {BOT_START_TIME.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"⏱️ <b>Ishlash vaqti:</b> {uptime_str}\n"
-        # f"📝 <b>Oxirgi yangilanish:</b> {last_update_time}\n"
-        # f"💾 <b>Ma'lumotlar manbai:</b> {'MongoDB' if mongo_connected else 'JSON fayllar'}\n"
+        f"💾 <b>Ma'lumotlar manbai:</b> {'MongoDB' if mongo_connected else 'JSON fayllar'}\n"
         f"🌏 <b>Mintaqa:</b> Toshkent (UTC+5)"
     )
 
@@ -436,7 +336,7 @@ def export_users_to_excel(chat_id, data):
         with open(filename, 'rb') as f:
             files = {'document': f}
             params = {'chat_id': chat_id, 'caption': '📊 Foydalanuvchilar ro\'yxati'}
-            requests.post(f"{BASE_URL}sendDocument", params=params, files=files, timeout=20)
+            requests.post(f"{BASE_URL}sendDocument", params=params, files=files, timeout=30)
             
         try:
             os.remove(filename)
@@ -448,15 +348,9 @@ def export_users_to_excel(chat_id, data):
 
 def broadcast_message(chat_id, text, data):
     try:
-        try:
-            if mongo_connected and users_col is not None:
-                total = users_col.count_documents({})
-            else:
-                total = len(data['users'])
-        except Exception:
-            total = len(data['users'])
+        total_users = len(data['users'])
+        send_message(chat_id, f"📣 Xabar {total_users} foydalanuvchiga yuborilmoqda...")
         
-        send_message(chat_id, f"📣 Xabar {total} foydalanuvchiga yuborilmoqda...")
         success = 0
         failed = 0
         
@@ -467,25 +361,24 @@ def broadcast_message(chat_id, text, data):
                         success += 1
                     else:
                         failed += 1
-                    time.sleep(0.05)
+                    time.sleep(0.1)
             except Exception:
                 failed += 1
         
-        send_message(chat_id, f"📣 Xabar yuborish yakunlandi!\n\n✅ Muvaffaqiyatli: {success}\n❌ Xatolar: {failed}", reply_markup=admin_menu())
+        send_message(chat_id, 
+                    f"📣 Xabar yuborish yakunlandi!\n\n"
+                    f"✅ Muvaffaqiyatli: {success}\n"
+                    f"❌ Xatolar: {failed}", 
+                    reply_markup=admin_menu())
     except Exception:
         send_message(chat_id, "❌ Xabar tarqatishda xatolik yuz berdi!")
 
-# Simple HTTP server for health checks
+# Soddalashtirilgan Health server
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/':
+        if self.path in ['/', '/health', '/status']:
             self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(b'CoderMrx Bot is running!')
-        elif self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-type', 'text/plain')
             self.end_headers()
             self.wfile.write(b'OK')
         else:
@@ -493,27 +386,26 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
     
     def log_message(self, format, *args):
-        pass
+        pass  # HTTP loglarini o'chirish
 
-def run_health_server(port):
-    try:
-        server = HTTPServer(('0.0.0.0', port), HealthHandler)
-        server.serve_forever()
-    except Exception:
-        pass
+def run_health_server():
+    port = int(os.environ.get('PORT', 8000))
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    print(f"🔄 Health server {port}-portda ishga tushdi")
+    server.serve_forever()
 
 def load_next_offset():
     try:
         with open(LAST_OFFSET_FILE, 'r') as f:
-            v = f.read().strip()
-            return int(v) if v else None
-    except Exception:
+            offset = f.read().strip()
+            return int(offset) if offset else None
+    except:
         return None
 
 def save_next_offset(offset):
     try:
         with open(LAST_OFFSET_FILE, 'w') as f:
-            f.write(str(int(offset)) if offset is not None else '')
+            f.write(str(offset))
     except Exception:
         pass
 
@@ -523,28 +415,54 @@ def ensure_no_webhook():
     except Exception:
         pass
 
-# Track forwarded messages to avoid duplicates
-forwarded_messages = set()
+# Render URL siz o'zini ping qilish
+def self_ping():
+    """Bot o'ziga har 5 minutda so'rov yuboradi"""
+    def ping_loop():
+        time.sleep(30)  # Bot to'liq yuklanishini kutadi
+        
+        # Render external hostname ni olish
+        render_hostname = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+        
+        while True:
+            try:
+                # Agar Render hostname mavjud bo'lsa, o'sha URL ga so'rov yuboradi
+                if render_hostname:
+                    url = f"https://{render_hostname}"
+                    response = requests.get(url, timeout=10)
+                    print(f"🔄 Self-ping: {url} → {response.status_code}")
+                else:
+                    # Agar hostname bo'lmasa, local health check qiladi
+                    port = os.environ.get('PORT', 8000)
+                    response = requests.get(f"http://localhost:{port}/health", timeout=5)
+                    print(f"🔄 Local ping: {response.status_code}")
+                    
+            except Exception as e:
+                print(f"🔄 Ping xatosi: {e}")
+            
+            # Har 5 minutda (300 soniya)
+            time.sleep(300)
+    
+    # Ping ni background da ishga tushirish
+    ping_thread = threading.Thread(target=ping_loop, daemon=True)
+    ping_thread.start()
+    print("✅ Self-ping funksiyasi ishga tushdi")
 
+# Asosiy message processor
 def process_message(update, data):
     try:
         message = update.get('message') or {}
         chat_id = message.get('chat', {}).get('id')
         user_id = message.get('from', {}).get('id')
         text = (message.get('text') or '').strip()
-        message_id = message.get('message_id')
 
         if not user_id:
             return data
 
-        msg_identifier = f"{chat_id}_{message_id}"
-        if msg_identifier in forwarded_messages:
-            return data
-        
         user_id_str = str(user_id)
+        current_time = format_tashkent_time()
         
         # User ma'lumotlarini yangilash
-        current_time = format_tashkent_time()
         if user_id_str not in data['users']:
             data['users'][user_id_str] = {
                 'id': user_id,
@@ -562,321 +480,101 @@ def process_message(update, data):
             data['users'][user_id_str]['message_count'] = data['users'][user_id_str].get('message_count', 0) + 1
 
         # Xabarni saqlash
-        try:
-            if mongo_connected and messages_col is not None:
-                msg_doc = {
-                    'user_id': user_id, 
-                    'message_id': message_id, 
-                    'text': text, 
-                    'date': get_tashkent_time(),
-                    'chat_id': chat_id
-                }
-                messages_col.insert_one(msg_doc)
-            
-            data['messages'].append({
-                'user_id': user_id, 
-                'message_id': message_id, 
-                'text': text, 
-                'date': current_time,
-                'chat_id': chat_id
-            })
-        except Exception:
-            data['messages'].append({
-                'user_id': user_id, 
-                'message_id': message_id, 
-                'text': text, 
-                'date': current_time,
-                'chat_id': chat_id
-            })
+        data['messages'].append({
+            'user_id': user_id,
+            'text': text,
+            'date': current_time
+        })
 
-        # restart (admin only)
-        if text == "/restart" and user_id in data['admins']:
-            send_message(chat_id, "🔄 Bot restart qilinmoqda...")
-            save_data(data)
-            threading.Timer(1.0, lambda: os._exit(0)).start()
-            return data
-
-        # start
+        # Command processing
         if text == "/start":
             if user_id in data['admins']:
-                send_message(chat_id, "👋 Admin paneliga xush kelibsiz!", reply_markup=admin_menu())
+                send_message(chat_id, "👋 Admin paneliga xush kelibsiz!", admin_menu())
             else:
-                send_message(chat_id, "👋 Botimizga xush kelibsiz! Savollaringiz bo'lsa yozib qoldiring va biz tez orada siz bilan bog'lanamiz", reply_markup=user_menu())
-            save_data(data)
-            return data
+                send_message(chat_id, 
+                            "👋 Botimizga xush kelibsiz! Savollaringiz bo'lsa yozib qoldiring va biz tez orada siz bilan bog'lanamiz", 
+                            user_menu())
 
-        if text == "🔙 Foydalanuvchi menyusi":
-            send_message(chat_id, "Asosiy menyu:", reply_markup=user_menu(is_admin=(user_id in data['admins'])))
-            save_data(data)
-            return data
+        elif text == "🔙 Foydalanuvchi menyusi":
+            send_message(chat_id, "Asosiy menyu:", user_menu(is_admin=(user_id in data['admins'])))
 
-        if text == "🔙 Admin paneli" and user_id in data['admins']:
-            user_data = data['users'][user_id_str]
-            for key in ['awaiting_broadcast', 'awaiting_channel_add', 'awaiting_admin_add', 'awaiting_admin_remove', 'awaiting_channel_remove']:
-                user_data.pop(key, None)
-            send_message(chat_id, "Admin paneliga qaytildi:", reply_markup=admin_menu())
-            save_data(data)
-            return data
+        elif text == "🔙 Admin paneli" and user_id in data['admins']:
+            send_message(chat_id, "Admin paneliga qaytildi:", admin_menu())
 
-        if text == "📢 Bizning kanallar":
-            channels = "\n".join([f"📢 {channel.get('name', channel_id)} - @{channel_id}" for channel_id, channel in data['channels'].items()])
+        elif text == "📢 Bizning kanallar":
+            channels = "\n".join([f"📢 {channel.get('name', channel_id)}" for channel_id, channel in data['channels'].items()])
             send_message(chat_id, f"📢 Bizning kanallar:\n\n{channels or 'Hozircha kanallar mavjud emas'}")
-            return data
 
-        if text == "💸 Donat":
+        elif text == "💸 Donat":
             send_message(chat_id, "💸 Bizni qo'llab-quvvatlang:\n\n🔹 Donat link: https://tirikchilik.uz/codermrx\n")
-            return data
 
-        if text == "ℹ️ Yordam":
+        elif text == "ℹ️ Yordam":
             send_message(chat_id, "ℹ️ Yordam:\n\nAgar savollaringiz bo'lsa, @codermrxbot ga yozishingiz mumkin.")
-            return data
 
-        # Admin actions
-        if user_id in data['admins']:
+        # Admin commands
+        elif user_id in data['admins']:
             if text == "📊 Statistika":
                 send_message(chat_id, get_stats(data))
-                return data
-            if text == "👥 Userlar ro'yxati":
+            elif text == "👥 Userlar ro'yxati":
                 export_users_to_excel(chat_id, data)
-                return data
-            if text == "📣 Hammaga xabar":
-                send_message(chat_id, "📣 Hammaga yuboriladigan xabarni yozing yoki Bekor qilishni bosing:", reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
-                data['users'][user_id_str]['awaiting_broadcast'] = True
-                save_data(data)
-                return data
-            if text == "👨‍💻 Adminlar":
-                send_message(chat_id, "Adminlar boshqaruvi:", reply_markup=admins_management_menu())
-                return data
-            if text == "📢 Kanallar":
-                send_message(chat_id, "Kanallar boshqaruvi:", reply_markup=channels_management_menu())
-                return data
-            if text == "➕ Admin qo'shish":
-                send_message(chat_id, "Yangi admin ID sini yuboring:", reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
-                data['users'][user_id_str]['awaiting_admin_add'] = True
-                save_data(data)
-                return data
-            if text == "➖ Admin o'chirish":
-                send_message(chat_id, "O'chiriladigan admin ID sini yuboring:", reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
-                data['users'][user_id_str]['awaiting_admin_remove'] = True
-                save_data(data)
-                return data
-            if text == "📋 Adminlar ro'yxati":
+            elif text == "👨‍💻 Adminlar":
+                send_message(chat_id, "Adminlar boshqaruvi:", admins_management_menu())
+            elif text == "📢 Kanallar":
+                send_message(chat_id, "Kanallar boshqaruvi:", channels_management_menu())
+            elif text == "📋 Adminlar ro'yxati":
                 admins_list = "\n".join([f"👤 {data['users'].get(str(a), {}).get('first_name','Nomalum')} (ID: {a})" for a in data['admins']])
-                send_message(chat_id, f"Adminlar ro'yxati:\n\n{admins_list}", reply_markup=admin_menu())
-                return data
-            if text == "➕ Kanal qo'shish":
-                send_message(chat_id, "Kanal qo'shish format:\nKanal nomi | username (username @sizsiz) yoki\nKanal nomi | id\nMisol:\nKanalim | mychannel", reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
-                data['users'][user_id_str]['awaiting_channel_add'] = True
-                save_data(data)
-                return data
-            if text == "➖ Kanal o'chirish":
-                send_message(chat_id, "O'chiriladigan kanal username yoki id sini yuboring:", reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
-                data['users'][user_id_str]['awaiting_channel_remove'] = True
-                save_data(data)
-                return data
-            if text == "📋 Kanallar ro'yxati":
-                channels_list = "\n".join([f"📢 {c.get('name', k)} ({c.get('username', k)})" for k, c in data['channels'].items()])
-                send_message(chat_id, f"Kanallar ro'yxati:\n\n{channels_list or 'Kanallar mavjud emas'}", reply_markup=admin_menu())
-                return data
-
-            # awaiting handlers
-            user_data = data['users'][user_id_str]
-            
-            if user_data.get('awaiting_broadcast'):
-                if text in ("Bekor qilish", "🔙 Admin paneli"):
-                    user_data.pop('awaiting_broadcast', None)
-                    send_message(chat_id, "Hammaga xabar bekor qilindi.", reply_markup=admin_menu())
-                    save_data(data)
-                    return data
-                user_data.pop('awaiting_broadcast', None)
-                broadcast_message(chat_id, text, data)
-                save_data(data)
-                return data
-
-            if user_data.get('awaiting_admin_add'):
-                if text in ("Bekor qilish", "🔙 Admin paneli"):
-                    user_data.pop('awaiting_admin_add', None)
-                    send_message(chat_id, "Amal bekor qilindi.", reply_markup=admin_menu())
-                    save_data(data)
-                    return data
-                user_data.pop('awaiting_admin_add', None)
-                try:
-                    new_admin = int(text)
-                    if new_admin not in data['admins']:
-                        data['admins'].append(new_admin)
-                        if mongo_connected and users_col is not None: 
-                            users_col.update_one({'id': new_admin}, {'$set': {'is_admin': True}}, upsert=True)
-                        if mongo_connected and admins_col is not None: 
-                            admins_col.update_one({'admin_id': new_admin}, {'$set': {'admin_id': new_admin}}, upsert=True)
-                        send_message(chat_id, f"✅ {new_admin} admin qilindi", reply_markup=admin_menu())
-                    else:
-                        send_message(chat_id, "⚠️ Bu foydalanuvchi allaqachon admin", reply_markup=admin_menu())
-                except ValueError:
-                    send_message(chat_id, "❌ Noto'g'ri ID format", reply_markup=admin_menu())
-                save_data(data)
-                return data
-
-            if user_data.get('awaiting_admin_remove'):
-                if text in ("Bekor qilish", "🔙 Admin paneli"):
-                    user_data.pop('awaiting_admin_remove', None)
-                    send_message(chat_id, "Amal bekor qilindi.", reply_markup=admin_menu())
-                    save_data(data)
-                    return data
-                user_data.pop('awaiting_admin_remove', None)
-                try:
-                    rem_admin = int(text)
-                    if rem_admin in data['admins'] and rem_admin != MAIN_ADMIN:
-                        data['admins'].remove(rem_admin)
-                        if mongo_connected and users_col is not None: 
-                            users_col.update_one({'id': rem_admin}, {'$set': {'is_admin': False}})
-                        if mongo_connected and admins_col is not None: 
-                            admins_col.delete_one({'admin_id': rem_admin})
-                        send_message(chat_id, f"✅ {rem_admin} adminlikdan olindi", reply_markup=admin_menu())
-                    else:
-                        send_message(chat_id, "❌ Admin topilmadi yoki asosiy adminni o'chirib bo'lmaydi", reply_markup=admin_menu())
-                except ValueError:
-                    send_message(chat_id, "❌ Noto'g'ri ID format", reply_markup=admin_menu())
-                save_data(data)
-                return data
-
-            if user_data.get('awaiting_channel_add'):
-                if text in ("Bekor qilish", "🔙 Admin paneli"):
-                    user_data.pop('awaiting_channel_add', None)
-                    send_message(chat_id, "Kanal qo'shish bekor qilindi.", reply_markup=admin_menu())
-                    save_data(data)
-                    return data
-                parts = [p.strip() for p in text.split('|', 1)]
-                if len(parts) != 2 or not parts[0] or not parts[1]:
-                    send_message(chat_id, "Noto'g'ri format. Iltimos: Kanal nomi | username yoki Kanal nomi | id", reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
-                    return data
-                name, ident = parts
-                current_time = format_tashkent_time()
-                if ident.isdigit():
-                    key = ident
-                    channel_doc = {'id': int(ident), 'name': name, 'added_by': user_id, 'added_date': current_time}
-                    if mongo_connected and channels_col is not None: 
-                        channels_col.update_one({'id': channel_doc['id']}, {'$set': channel_doc}, upsert=True)
-                else:
-                    username = ident.lstrip('@')
-                    key = username
-                    channel_doc = {'username': username, 'name': name, 'added_by': user_id, 'added_date': current_time}
-                    if mongo_connected and channels_col is not None: 
-                        channels_col.update_one({'username': username}, {'$set': channel_doc}, upsert=True)
-                data['channels'][str(key)] = channel_doc
-                user_data.pop('awaiting_channel_add', None)
-                send_message(chat_id, f"✅ Kanal qo'shildi: {name} ({ident})", reply_markup=admin_menu())
-                save_data(data)
-                return data
-
-            if user_data.get('awaiting_channel_remove'):
-                if text in ("Bekor qilish", "🔙 Admin paneli"):
-                    user_data.pop('awaiting_channel_remove', None)
-                    send_message(chat_id, "Amal bekor qilindi.", reply_markup=admin_menu())
-                    save_data(data)
-                    return data
-                user_data.pop('awaiting_channel_remove', None)
-                ch_ident = text.strip().lstrip('@')
-                removed = False
-                if ch_ident.isdigit():
-                    for k, v in list(data['channels'].items()):
-                        if str(v.get('id', '')) == ch_ident or k == ch_ident:
-                            del data['channels'][k]
-                            if mongo_connected and channels_col is not None: 
-                                channels_col.delete_one({'id': int(ch_ident)})
-                            removed = True
-                else:
-                    if ch_ident in data['channels']:
-                        del data['channels'][ch_ident]
-                        if mongo_connected and channels_col is not None: 
-                            channels_col.delete_one({'username': ch_ident})
-                        removed = True
-                if removed:
-                    send_message(chat_id, f"✅ {ch_ident} o'chirildi", reply_markup=admin_menu())
-                else:
-                    send_message(chat_id, "❌ Kanal topilmadi", reply_markup=admin_menu())
-                save_data(data)
-                return data
-
-        # Non-admin xabarlarni adminlarga yuborish
-        if user_id not in data['admins'] and text and not text.startswith('/'):
-            forwarded_messages.add(msg_identifier)
-            if data['admins']:
-                admin_id = data['admins'][0]
-                if forward_message(admin_id, chat_id, message_id):
-                    user_info = data['users'][user_id_str]
-                    send_message(admin_id,
-                                 f"📨 Yangi xabar!\n👤: {user_info.get('first_name','')} {user_info.get('last_name','')}\n"
-                                 f"📱: @{user_info.get('username','noma`lum')}\n🆔: {user_id}\n📝: {text[:200]}")
-            
-            send_message(chat_id, "✅ Xabaringiz qabul qilindi! Tez orada javob beramiz.")
+                send_message(chat_id, f"Adminlar ro'yxati:\n\n{admins_list}")
+            elif text == "📋 Kanallar ro'yxati":
+                channels_list = "\n".join([f"📢 {c.get('name', k)}" for k, c in data['channels'].items()])
+                send_message(chat_id, f"Kanallar ro'yxati:\n\n{channels_list or 'Kanallar mavjud emas'}")
 
         save_data(data)
         return data
-
+        
     except Exception:
         return data
 
-# Keep-alive funksiyasi
-def keep_alive_ping():
-    keep_alive_url = os.environ.get('KEEP_ALIVE_URL')
-    if not keep_alive_url:
-        return
-    
-    try:
-        keep_alive_interval = int(os.environ.get('KEEP_ALIVE_INTERVAL', '300'))
-    except Exception:
-        keep_alive_interval = 300
-    
-    def ping_loop():
-        while True:
-            try:
-                requests.get(keep_alive_url, timeout=10)
-            except Exception:
-                pass
-            time.sleep(keep_alive_interval)
-    
-    t = threading.Thread(target=ping_loop, daemon=True)
-    t.start()
-
 def main():
-    data = load_data()
-
-    ensure_no_webhook()
-    next_offset = load_next_offset()
-
-    # Health server
-    try:
-        port = int(os.environ.get('PORT', '8000'))
-    except Exception:
-        port = 8000
-    t = threading.Thread(target=run_health_server, args=(port,), daemon=True)
-    t.start()
-
-    keep_alive_ping()
-
-    print("✅ Bot ishga tushdi...")
-    print(f"🕒 Bot ishga tushgan vaqt: {BOT_START_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"💾 Ma'lumotlar manbai: {'MongoDB' if mongo_connected else 'JSON fayllar'}")
+    print("🚀 Bot ishga tushmoqda...")
     
+    # MongoDB ni ishga tushirish
+    init_mongodb()
+    
+    # Webhook ni o'chirish
+    ensure_no_webhook()
+    
+    # Health server ni ishga tushirish
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    
+    # Self-ping ni ishga tushirish
+    self_ping()
+    
+    # Ma'lumotlarni yuklash
+    data = load_data()
+    next_offset = load_next_offset()
+    
+    print(f"✅ Bot ishga tushdi: {format_tashkent_time()}")
+    print(f"📊 Userlar: {len(data['users'])}, Kanallar: {len(data['channels'])}")
+    
+    # Asosiy loop
     while True:
         try:
             updates = get_updates(next_offset)
-            for update in updates:
-                uid = update.get('update_id')
-                if uid is None:
-                    continue
-                
-                if next_offset is not None and uid < next_offset:
-                    continue
-                
-                data = process_message(update, data)
-                next_offset = uid + 1
-                save_next_offset(next_offset)
             
-            save_data(data)
-            time.sleep(0.2)
-        except Exception:
-            time.sleep(3)
+            for update in updates:
+                update_id = update.get('update_id')
+                if update_id is not None:
+                    if next_offset is None or update_id >= next_offset:
+                        data = process_message(update, data)
+                        next_offset = update_id + 1
+                        save_next_offset(next_offset)
+            
+            time.sleep(1)
+            
+        except Exception as e:
+            print(f"Xato: {e}")
+            time.sleep(5)
 
 if __name__ == '__main__':
     main()
