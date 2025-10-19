@@ -224,6 +224,15 @@ def send_message(chat_id, text, reply_markup=None):
     except Exception:
         return False
 
+def forward_message(chat_id, from_chat_id, message_id):
+    try:
+        url = BASE_URL + "forwardMessage"
+        payload = {'chat_id': chat_id, 'from_chat_id': from_chat_id, 'message_id': message_id}
+        response = requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception:
+        return False
+
 def get_updates(offset=None):
     try:
         url = BASE_URL + "getUpdates"
@@ -448,6 +457,9 @@ def self_ping():
     ping_thread.start()
     print("✅ Self-ping funksiyasi ishga tushdi")
 
+# Track forwarded messages to avoid duplicates
+forwarded_messages = set()
+
 # Asosiy message processor
 def process_message(update, data):
     try:
@@ -455,8 +467,14 @@ def process_message(update, data):
         chat_id = message.get('chat', {}).get('id')
         user_id = message.get('from', {}).get('id')
         text = (message.get('text') or '').strip()
+        message_id = message.get('message_id')
 
         if not user_id:
+            return data
+
+        # Unique message identifier to avoid duplicate processing
+        msg_identifier = f"{chat_id}_{message_id}"
+        if msg_identifier in forwarded_messages:
             return data
 
         user_id_str = str(user_id)
@@ -499,39 +517,210 @@ def process_message(update, data):
             send_message(chat_id, "Asosiy menyu:", user_menu(is_admin=(user_id in data['admins'])))
 
         elif text == "🔙 Admin paneli" and user_id in data['admins']:
+            # Clear awaiting states
+            if user_id_str in data['users']:
+                user_data = data['users'][user_id_str]
+                for key in ['awaiting_broadcast', 'awaiting_channel_add', 'awaiting_admin_add', 'awaiting_admin_remove', 'awaiting_channel_remove']:
+                    user_data.pop(key, None)
             send_message(chat_id, "Admin paneliga qaytildi:", admin_menu())
 
         elif text == "📢 Bizning kanallar":
-            channels = "\n".join([f"📢 {channel.get('name', channel_id)}" for channel_id, channel in data['channels'].items()])
-            send_message(chat_id, f"📢 Bizning kanallar:\n\n{channels or 'Hozircha kanallar mavjud emas'}")
+            if data['channels']:
+                channels_text = "📢 <b>Bizning kanallar:</b>\n\n"
+                for channel_id, channel in data['channels'].items():
+                    channel_name = channel.get('name', channel_id)
+                    channel_username = channel.get('username', channel_id)
+                    channels_text += f"🔹 {channel_name}\n📎 @{channel_username}\n\n"
+                send_message(chat_id, channels_text)
+            else:
+                send_message(chat_id, "📢 Hozircha kanallar mavjud emas")
 
         elif text == "💸 Donat":
-            send_message(chat_id, "💸 Bizni qo'llab-quvvatlang:\n\n🔹 Donat link: https://tirikchilik.uz/codermrx\n")
+            send_message(chat_id, "💸 <b>Bizni qo'llab-quvvatlang:</b>\n\n🔹 Donat link: https://tirikchilik.uz/codermrx\n")
 
         elif text == "ℹ️ Yordam":
-            send_message(chat_id, "ℹ️ Yordam:\n\nAgar savollaringiz bo'lsa, @codermrxbot ga yozishingiz mumkin.")
+            send_message(chat_id, "ℹ️ <b>Yordam:</b>\n\nAgar savollaringiz bo'lsa, @codermrxbot ga yozishingiz mumkin.")
 
         # Admin commands
         elif user_id in data['admins']:
             if text == "📊 Statistika":
                 send_message(chat_id, get_stats(data))
+            
             elif text == "👥 Userlar ro'yxati":
                 export_users_to_excel(chat_id, data)
+            
+            elif text == "📣 Hammaga xabar":
+                send_message(chat_id, 
+                            "📣 <b>Hammaga yuboriladigan xabarni yozing:</b>\n\n"
+                            "Yoki <b>Bekor qilish</b> tugmasini bosing", 
+                            reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
+                data['users'][user_id_str]['awaiting_broadcast'] = True
+            
             elif text == "👨‍💻 Adminlar":
-                send_message(chat_id, "Adminlar boshqaruvi:", admins_management_menu())
+                send_message(chat_id, "👨‍💻 <b>Adminlar boshqaruvi:</b>", reply_markup=admins_management_menu())
+            
             elif text == "📢 Kanallar":
-                send_message(chat_id, "Kanallar boshqaruvi:", channels_management_menu())
+                send_message(chat_id, "📢 <b>Kanallar boshqaruvi:</b>", reply_markup=channels_management_menu())
+            
+            elif text == "➕ Admin qo'shish":
+                send_message(chat_id, 
+                            "👨‍💻 <b>Yangi admin ID sini yuboring:</b>\n\n"
+                            "Yoki <b>Bekor qilish</b> tugmasini bosing", 
+                            reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
+                data['users'][user_id_str]['awaiting_admin_add'] = True
+            
+            elif text == "➖ Admin o'chirish":
+                send_message(chat_id, 
+                            "👨‍💻 <b>O'chiriladigan admin ID sini yuboring:</b>\n\n"
+                            "Yoki <b>Bekor qilish</b> tugmasini bosing", 
+                            reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
+                data['users'][user_id_str]['awaiting_admin_remove'] = True
+            
             elif text == "📋 Adminlar ro'yxati":
-                admins_list = "\n".join([f"👤 {data['users'].get(str(a), {}).get('first_name','Nomalum')} (ID: {a})" for a in data['admins']])
-                send_message(chat_id, f"Adminlar ro'yxati:\n\n{admins_list}")
+                if data['admins']:
+                    admins_text = "👨‍💻 <b>Adminlar ro'yxati:</b>\n\n"
+                    for admin_id in data['admins']:
+                        admin_user = data['users'].get(str(admin_id), {})
+                        admin_name = admin_user.get('first_name', 'Nomalum')
+                        admin_username = f" @{admin_user.get('username')}" if admin_user.get('username') else ""
+                        admins_text += f"👤 {admin_name}{admin_username} (ID: {admin_id})\n"
+                    send_message(chat_id, admins_text, reply_markup=admin_menu())
+                else:
+                    send_message(chat_id, "👨‍💻 Adminlar mavjud emas", reply_markup=admin_menu())
+            
+            elif text == "➕ Kanal qo'shish":
+                send_message(chat_id, 
+                            "📢 <b>Kanal qo'shish formati:</b>\n\n"
+                            "Kanal nomi | username\n"
+                            "<b>Misol:</b>\n"
+                            "CoderMrx | codermrx\n\n"
+                            "Yoki <b>Bekor qilish</b> tugmasini bosing", 
+                            reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
+                data['users'][user_id_str]['awaiting_channel_add'] = True
+            
+            elif text == "➖ Kanal o'chirish":
+                send_message(chat_id, 
+                            "📢 <b>O'chiriladigan kanal username ni yuboring:</b>\n\n"
+                            "Yoki <b>Bekor qilish</b> tugmasini bosing", 
+                            reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
+                data['users'][user_id_str]['awaiting_channel_remove'] = True
+            
             elif text == "📋 Kanallar ro'yxati":
-                channels_list = "\n".join([f"📢 {c.get('name', k)}" for k, c in data['channels'].items()])
-                send_message(chat_id, f"Kanallar ro'yxati:\n\n{channels_list or 'Kanallar mavjud emas'}")
+                if data['channels']:
+                    channels_text = "📢 <b>Kanallar ro'yxati:</b>\n\n"
+                    for channel_id, channel in data['channels'].items():
+                        channel_name = channel.get('name', channel_id)
+                        channel_username = channel.get('username', channel_id)
+                        channels_text += f"🔹 {channel_name} (@{channel_username})\n"
+                    send_message(chat_id, channels_text, reply_markup=admin_menu())
+                else:
+                    send_message(chat_id, "📢 Kanallar mavjud emas", reply_markup=admin_menu())
+
+            # Awaiting handlers for admin actions
+            user_data = data['users'].get(user_id_str, {})
+            
+            # Broadcast message handler
+            if user_data.get('awaiting_broadcast'):
+                if text in ("Bekor qilish", "🔙 Admin paneli"):
+                    user_data.pop('awaiting_broadcast', None)
+                    send_message(chat_id, "❌ Xabar yuborish bekor qilindi", reply_markup=admin_menu())
+                else:
+                    user_data.pop('awaiting_broadcast', None)
+                    broadcast_message(chat_id, text, data)
+            
+            # Add admin handler
+            elif user_data.get('awaiting_admin_add'):
+                if text in ("Bekor qilish", "🔙 Admin paneli"):
+                    user_data.pop('awaiting_admin_add', None)
+                    send_message(chat_id, "❌ Admin qo'shish bekor qilindi", reply_markup=admin_menu())
+                else:
+                    try:
+                        new_admin = int(text)
+                        if new_admin not in data['admins']:
+                            data['admins'].append(new_admin)
+                            send_message(chat_id, f"✅ {new_admin} admin qo'shildi", reply_markup=admin_menu())
+                        else:
+                            send_message(chat_id, "⚠️ Bu foydalanuvchi allaqachon admin", reply_markup=admin_menu())
+                    except ValueError:
+                        send_message(chat_id, "❌ Noto'g'ri ID format", reply_markup=admin_menu())
+                    user_data.pop('awaiting_admin_add', None)
+            
+            # Remove admin handler
+            elif user_data.get('awaiting_admin_remove'):
+                if text in ("Bekor qilish", "🔙 Admin paneli"):
+                    user_data.pop('awaiting_admin_remove', None)
+                    send_message(chat_id, "❌ Admin o'chirish bekor qilindi", reply_markup=admin_menu())
+                else:
+                    try:
+                        rem_admin = int(text)
+                        if rem_admin in data['admins'] and rem_admin != MAIN_ADMIN:
+                            data['admins'].remove(rem_admin)
+                            send_message(chat_id, f"✅ {rem_admin} adminlikdan olindi", reply_markup=admin_menu())
+                        else:
+                            send_message(chat_id, "❌ Admin topilmadi yoki asosiy adminni o'chirib bo'lmaydi", reply_markup=admin_menu())
+                    except ValueError:
+                        send_message(chat_id, "❌ Noto'g'ri ID format", reply_markup=admin_menu())
+                    user_data.pop('awaiting_admin_remove', None)
+            
+            # Add channel handler
+            elif user_data.get('awaiting_channel_add'):
+                if text in ("Bekor qilish", "🔙 Admin paneli"):
+                    user_data.pop('awaiting_channel_add', None)
+                    send_message(chat_id, "❌ Kanal qo'shish bekor qilindi", reply_markup=admin_menu())
+                else:
+                    parts = text.split('|')
+                    if len(parts) == 2:
+                        name = parts[0].strip()
+                        username = parts[1].strip().lstrip('@')
+                        data['channels'][username] = {
+                            'username': username,
+                            'name': name,
+                            'added_by': user_id,
+                            'added_date': current_time
+                        }
+                        send_message(chat_id, f"✅ Kanal qo'shildi: {name} (@{username})", reply_markup=admin_menu())
+                    else:
+                        send_message(chat_id, "❌ Noto'g'ri format. Iltimos: Kanal nomi | username", 
+                                   reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
+                        return data
+                    user_data.pop('awaiting_channel_add', None)
+            
+            # Remove channel handler
+            elif user_data.get('awaiting_channel_remove'):
+                if text in ("Bekor qilish", "🔙 Admin paneli"):
+                    user_data.pop('awaiting_channel_remove', None)
+                    send_message(chat_id, "❌ Kanal o'chirish bekor qilindi", reply_markup=admin_menu())
+                else:
+                    channel_id = text.strip().lstrip('@')
+                    if channel_id in data['channels']:
+                        del data['channels'][channel_id]
+                        send_message(chat_id, f"✅ @{channel_id} kanali o'chirildi", reply_markup=admin_menu())
+                    else:
+                        send_message(chat_id, "❌ Kanal topilmadi", reply_markup=admin_menu())
+                    user_data.pop('awaiting_channel_remove', None)
+
+        # Non-admin xabarlarni adminlarga yuborish
+        if user_id not in data['admins'] and text and not text.startswith('/'):
+            forwarded_messages.add(msg_identifier)
+            for admin_id in data['admins']:
+                try:
+                    forward_message(admin_id, chat_id, message_id)
+                    user_info = data['users'][user_id_str]
+                    send_message(admin_id,
+                                f"📨 <b>Yangi xabar!</b>\n"
+                                f"👤: {user_info.get('first_name','')} {user_info.get('last_name','')}\n"
+                                f"📱: @{user_info.get('username','noma`lum')}\n"
+                                f"🆔: {user_id}\n"
+                                f"📝: {text[:200]}")
+                except Exception:
+                    pass
+            send_message(chat_id, "✅ Xabaringiz qabul qilindi! Tez orada javob beramiz.")
 
         save_data(data)
         return data
         
-    except Exception:
+    except Exception as e:
+        print(f"Xabarni qayta ishlash xatosi: {e}")
         return data
 
 def main():
