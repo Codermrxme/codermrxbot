@@ -207,18 +207,49 @@ def save_data(data):
     # Messages
     save_json(data.get('messages', [])[-200:], MESSAGES_FILE)
 
-def send_message(chat_id, text, reply_markup=None):
+def send_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
     try:
         url = BASE_URL + "sendMessage"
         payload = {
             'chat_id': chat_id, 
             'text': text, 
-            'parse_mode': 'HTML',
+            'parse_mode': parse_mode,
             'disable_web_page_preview': True
         }
         if reply_markup:
             payload['reply_markup'] = json.dumps(reply_markup)
         
+        response = requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+def send_photo(chat_id, photo, caption=None, reply_markup=None):
+    try:
+        url = BASE_URL + "sendPhoto"
+        payload = {
+            'chat_id': chat_id,
+            'photo': photo
+        }
+        if caption:
+            payload['caption'] = caption
+            payload['parse_mode'] = 'HTML'
+        if reply_markup:
+            payload['reply_markup'] = json.dumps(reply_markup)
+        
+        response = requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+def copy_message(chat_id, from_chat_id, message_id):
+    try:
+        url = BASE_URL + "copyMessage"
+        payload = {
+            'chat_id': chat_id,
+            'from_chat_id': from_chat_id,
+            'message_id': message_id
+        }
         response = requests.post(url, json=payload, timeout=10)
         return response.status_code == 200
     except Exception:
@@ -355,7 +386,8 @@ def export_users_to_excel(chat_id, data):
     except Exception:
         send_message(chat_id, "❌ Foydalanuvchilar ro'yxatini yuborishda xatolik yuz berdi!")
 
-def broadcast_message(chat_id, text, data):
+def broadcast_message(chat_id, message_data, data):
+    """Rasmli postlarni ham yubora oladigan broadcast funksiyasi"""
     try:
         total_users = len(data['users'])
         send_message(chat_id, f"📣 Xabar {total_users} foydalanuvchiga yuborilmoqda...")
@@ -366,10 +398,25 @@ def broadcast_message(chat_id, text, data):
         for user_id in list(data['users'].keys()):
             try:
                 if int(user_id) not in data['admins']:  # Adminlarga yubormaymiz
-                    if send_message(int(user_id), text):
-                        success += 1
-                    else:
-                        failed += 1
+                    if message_data['type'] == 'text':
+                        # Oddiy matnli xabar
+                        if send_message(int(user_id), message_data['text']):
+                            success += 1
+                        else:
+                            failed += 1
+                    elif message_data['type'] == 'photo':
+                        # Rasmli xabar
+                        if send_photo(int(user_id), message_data['photo'], message_data.get('caption')):
+                            success += 1
+                        else:
+                            failed += 1
+                    elif message_data['type'] == 'forward':
+                        # Forward qilingan xabar
+                        if forward_message(int(user_id), message_data['from_chat_id'], message_data['message_id']):
+                            success += 1
+                        else:
+                            failed += 1
+                    
                     time.sleep(0.1)  # Rate limit
             except Exception as e:
                 print(f"Xabar yuborishda xato user {user_id}: {e}")
@@ -553,7 +600,8 @@ def process_message(update, data):
             
             elif text == "📣 Hammaga xabar":
                 send_message(chat_id, 
-                            "📣 <b>Hammaga yuboriladigan xabarni yozing:</b>\n\n"
+                            "📣 <b>Hammaga yuboriladigan xabarni yuboring:</b>\n\n"
+                            "Matn, rasm yoki boshqa kontent yuborishingiz mumkin\n\n"
                             "Yoki <b>Bekor qilish</b> tugmasini bosing", 
                             reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
                 data['users'][user_id_str]['awaiting_broadcast'] = True
@@ -640,7 +688,34 @@ def process_message(update, data):
                 else:
                     user_data.pop('awaiting_broadcast', None)
                     save_data(data)  # Avval saqlaymiz
-                    broadcast_message(chat_id, text, data)
+                    
+                    # Xabar turini aniqlash
+                    message_data = {}
+                    
+                    if message.get('photo'):
+                        # Rasmli xabar
+                        photo = message['photo'][-1]['file_id']  # Eng yuqori sifatli rasm
+                        caption = message.get('caption', '')
+                        message_data = {
+                            'type': 'photo',
+                            'photo': photo,
+                            'caption': caption
+                        }
+                    elif message.get('text'):
+                        # Matnli xabar
+                        message_data = {
+                            'type': 'text',
+                            'text': text
+                        }
+                    else:
+                        # Boshqa turdagi xabarlar (forward qilish)
+                        message_data = {
+                            'type': 'forward',
+                            'from_chat_id': chat_id,
+                            'message_id': message_id
+                        }
+                    
+                    broadcast_message(chat_id, message_data, data)
                 return data
             
             # Add admin handler
@@ -723,18 +798,19 @@ def process_message(update, data):
                 return data
 
         # Non-admin xabarlarni adminlarga yuborish
-        if user_id not in data['admins'] and text and not text.startswith('/'):
+        if user_id not in data['admins'] and (text or message.get('photo') or message.get('document')):
             forwarded_messages.add(msg_identifier)
             for admin_id in data['admins']:
                 try:
                     forward_message(admin_id, chat_id, message_id)
                     user_info = data['users'][user_id_str]
+                    message_content = text if text else "📎 Fayl/Rasm"
                     send_message(admin_id,
                                 f"📨 <b>Yangi xabar!</b>\n"
                                 f"👤: {user_info.get('first_name','')} {user_info.get('last_name','')}\n"
                                 f"📱: @{user_info.get('username','noma`lum')}\n"
                                 f"🆔: {user_id}\n"
-                                f"📝: {text[:200]}")
+                                f"📝: {message_content[:200]}")
                 except Exception:
                     pass
             send_message(chat_id, "✅ Xabaringiz qabul qilindi! Tez orada javob beramiz.")
