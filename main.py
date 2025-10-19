@@ -3,7 +3,7 @@ import json
 import time
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 import pymongo
 import threading
@@ -25,6 +25,43 @@ BASE_URL = f"https://api.telegram.org/bot{TOKEN}/"
 # Mongo settings
 MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017')
 MONGO_DB = os.getenv('MONGO_DB', 'codermrxbot')
+
+# Toshkent vaqti (UTC+5)
+TASHKENT_TZ = timezone(timedelta(hours=5))
+
+def get_tashkent_time():
+    """Toshkent vaqtini qaytaradi"""
+    return datetime.now(TASHKENT_TZ)
+
+def format_tashkent_time(dt=None):
+    """Toshkent vaqtini formatlab qaytaradi"""
+    if dt is None:
+        dt = get_tashkent_time()
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+def format_uptime(seconds):
+    """Uptime ni formatlab qaytaradi"""
+    days = seconds // (24 * 3600)
+    seconds %= (24 * 3600)
+    hours = seconds // 3600
+    seconds %= 3600
+    minutes = seconds // 60
+    seconds %= 60
+    
+    parts = []
+    if days > 0:
+        parts.append(f"{days} kun")
+    if hours > 0:
+        parts.append(f"{hours} soat")
+    if minutes > 0:
+        parts.append(f"{minutes} daqiqa")
+    if seconds > 0 or not parts:
+        parts.append(f"{seconds} soniya")
+    
+    return " ".join(parts)
+
+# Bot ishga tushgan vaqti
+BOT_START_TIME = get_tashkent_time()
 
 # MongoDB connection status
 mongo_connected = False
@@ -87,8 +124,8 @@ def load_data():
                     'last_name': doc.get('last_name', ''),
                     'username': doc.get('username', ''),
                     'phone': doc.get('phone', ''),
-                    'joined': doc.get('joined', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')),
-                    'last_active': doc.get('last_active', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')),
+                    'joined': doc.get('joined', format_tashkent_time()),
+                    'last_active': doc.get('last_active', format_tashkent_time()),
                     'message_count': int(doc.get('message_count', 0)),
                     'is_admin': bool(doc.get('is_admin', False))
                 }
@@ -308,10 +345,10 @@ def get_stats(data):
     except Exception:
         total_channels = len(data['channels'])
     
-    # Faol foydalanuvchilar
+    # Faol foydalanuvchilar (oxirgi 7 kun ichida faol bo'lganlar)
     try:
         active_users = 0
-        one_week_ago = datetime.now().timestamp() - (7 * 24 * 60 * 60)
+        one_week_ago = get_tashkent_time() - timedelta(days=7)
         
         if mongo_connected and users_col is not None:
             for user in users_col.find():
@@ -319,9 +356,9 @@ def get_stats(data):
                 if last_active:
                     try:
                         if isinstance(last_active, datetime):
-                            user_time = last_active.timestamp()
+                            user_time = last_active.replace(tzinfo=TASHKENT_TZ)
                         else:
-                            user_time = datetime.strptime(last_active, '%Y-%m-%d %H:%M:%S').timestamp()
+                            user_time = datetime.strptime(last_active, '%Y-%m-%d %H:%M:%S').replace(tzinfo=TASHKENT_TZ)
                         
                         if user_time >= one_week_ago:
                             active_users += 1
@@ -332,13 +369,31 @@ def get_stats(data):
                 last_active = user.get('last_active', '')
                 if last_active:
                     try:
-                        user_time = datetime.strptime(last_active, '%Y-%m-%d %H:%M:%S').timestamp()
+                        user_time = datetime.strptime(last_active, '%Y-%m-%d %H:%M:%S').replace(tzinfo=TASHKENT_TZ)
                         if user_time >= one_week_ago:
                             active_users += 1
                     except Exception:
                         continue
     except Exception:
         active_users = 0
+
+    # Oxirgi yangilanish vaqti (MongoDB dan)
+    last_update_time = "Noma'lum"
+    try:
+        if mongo_connected and messages_col is not None:
+            last_message = messages_col.find_one(sort=[('date', -1)])
+            if last_message and last_message.get('date'):
+                last_update_time = last_message['date'].strftime('%Y-%m-%d %H:%M:%S')
+        elif data.get('messages'):
+            last_message = max(data['messages'], key=lambda x: x.get('date', ''))
+            last_update_time = last_message.get('date', 'Noma\'lum')
+    except Exception:
+        pass
+
+    # Bot uptime
+    current_time = get_tashkent_time()
+    uptime_seconds = int((current_time - BOT_START_TIME).total_seconds())
+    uptime_str = format_uptime(uptime_seconds)
 
     return (
         "📊 <b>Bot statistikasi</b>\n\n"
@@ -347,8 +402,11 @@ def get_stats(data):
         f"📨 <b>Jami xabarlar:</b> {total_messages}\n"
         f"👨‍💻 <b>Adminlar:</b> {total_admins}\n"
         f"📢 <b>Kanallar:</b> {total_channels}\n\n"
-        f"💾 <b>Ma'lumotlar manbai:</b> {'MongoDB' if mongo_connected else 'JSON fayllar'}\n"
-        f"🔄 <i>Oxirgi yangilanish: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
+        f"🕒 <b>Bot ishga tushgan vaqti:</b> {BOT_START_TIME.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"⏱️ <b>Ishlash vaqti:</b> {uptime_str}\n"
+        # f"📝 <b>Oxirgi yangilanish:</b> {last_update_time}\n"
+        # f"💾 <b>Ma'lumotlar manbai:</b> {'MongoDB' if mongo_connected else 'JSON fayllar'}\n"
+        f"🌏 <b>Mintaqa:</b> Toshkent (UTC+5)"
     )
 
 def export_users_to_excel(chat_id, data):
@@ -372,7 +430,7 @@ def export_users_to_excel(chat_id, data):
             })
         
         df = pd.DataFrame(users_list)
-        filename = f"exports/users_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        filename = f"exports/users_{get_tashkent_time().strftime('%Y%m%d_%H%M%S')}.xlsx"
         df.to_excel(filename, index=False)
         
         with open(filename, 'rb') as f:
@@ -486,7 +544,7 @@ def process_message(update, data):
         user_id_str = str(user_id)
         
         # User ma'lumotlarini yangilash
-        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        current_time = format_tashkent_time()
         if user_id_str not in data['users']:
             data['users'][user_id_str] = {
                 'id': user_id,
@@ -510,7 +568,7 @@ def process_message(update, data):
                     'user_id': user_id, 
                     'message_id': message_id, 
                     'text': text, 
-                    'date': datetime.utcnow(),
+                    'date': get_tashkent_time(),
                     'chat_id': chat_id
                 }
                 messages_col.insert_one(msg_doc)
@@ -692,6 +750,7 @@ def process_message(update, data):
                     send_message(chat_id, "Noto'g'ri format. Iltimos: Kanal nomi | username yoki Kanal nomi | id", reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
                     return data
                 name, ident = parts
+                current_time = format_tashkent_time()
                 if ident.isdigit():
                     key = ident
                     channel_doc = {'id': int(ident), 'name': name, 'added_by': user_id, 'added_date': current_time}
@@ -796,6 +855,8 @@ def main():
     keep_alive_ping()
 
     print("✅ Bot ishga tushdi...")
+    print(f"🕒 Bot ishga tushgan vaqt: {BOT_START_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"💾 Ma'lumotlar manbai: {'MongoDB' if mongo_connected else 'JSON fayllar'}")
     
     while True:
         try:
