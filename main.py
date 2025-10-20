@@ -509,6 +509,22 @@ def self_ping():
 # Track forwarded messages to avoid duplicates
 forwarded_messages = set()
 
+# Commandlar ro'yxati - bu commandlar adminga yuborilmaydi
+USER_COMMANDS = {
+    '/start', '/help', '/yordam',
+    '📢 bizning kanallar', '📢 bizning kanallar', 
+    '💸 donat', '💸 donat',
+    'ℹ️ yordam', 'ℹ️ yordam',
+    '🔙 foydalanuvchi menyusi', '🔙 foydalanuvchi menyusi'
+}
+
+def is_user_command(text):
+    """Text user commanda ekanligini tekshiradi"""
+    if not text:
+        return False
+    text_lower = text.lower().strip()
+    return text_lower in USER_COMMANDS
+
 # Asosiy message processor
 def process_message(update, data):
     try:
@@ -561,9 +577,13 @@ def process_message(update, data):
                 send_message(chat_id, 
                             "👋 Botimizga xush kelibsiz! Savollaringiz bo'lsa yozib qoldiring va biz tez orada siz bilan bog'lanamiz", 
                             user_menu())
+            save_data(data)
+            return data
 
         elif text == "🔙 Foydalanuvchi menyusi":
             send_message(chat_id, "Asosiy menyu:", user_menu(is_admin=(user_id in data['admins'])))
+            save_data(data)
+            return data
 
         elif text == "🔙 Admin paneli" and user_id in data['admins']:
             # Clear awaiting states
@@ -572,6 +592,8 @@ def process_message(update, data):
                 for key in ['awaiting_broadcast', 'awaiting_channel_add', 'awaiting_admin_add', 'awaiting_admin_remove', 'awaiting_channel_remove']:
                     user_data.pop(key, None)
             send_message(chat_id, "Admin paneliga qaytildi:", admin_menu())
+            save_data(data)
+            return data
 
         elif text == "📢 Bizning kanallar":
             if data['channels']:
@@ -583,20 +605,30 @@ def process_message(update, data):
                 send_message(chat_id, channels_text)
             else:
                 send_message(chat_id, "📢 Hozircha kanallar mavjud emas")
+            save_data(data)
+            return data
 
         elif text == "💸 Donat":
             send_message(chat_id, "💸 <b>Bizni qo'llab-quvvatlang:</b>\n\n🔹 Donat link: https://tirikchilik.uz/codermrx\n")
+            save_data(data)
+            return data
 
         elif text == "ℹ️ Yordam":
             send_message(chat_id, "ℹ️ <b>Yordam:</b>\n\nAgar savollaringiz bo'lsa, @codermrxbot ga yozishingiz mumkin.")
+            save_data(data)
+            return data
 
         # Admin commands
         elif user_id in data['admins']:
             if text == "📊 Statistika":
                 send_message(chat_id, get_stats(data))
+                save_data(data)
+                return data
             
             elif text == "👥 Userlar ro'yxati":
                 export_users_to_excel(chat_id, data)
+                save_data(data)
+                return data
             
             elif text == "📣 Hammaga xabar":
                 send_message(chat_id, 
@@ -605,14 +637,18 @@ def process_message(update, data):
                             "Yoki <b>Bekor qilish</b> tugmasini bosing", 
                             reply_markup=create_keyboard(["Bekor qilish", "🔙 Admin paneli"]))
                 data['users'][user_id_str]['awaiting_broadcast'] = True
-                save_data(data)  # Darhol saqlaymiz
+                save_data(data)
                 return data
             
             elif text == "👨‍💻 Adminlar":
                 send_message(chat_id, "👨‍💻 <b>Adminlar boshqaruvi:</b>", reply_markup=admins_management_menu())
+                save_data(data)
+                return data
             
             elif text == "📢 Kanallar":
                 send_message(chat_id, "📢 <b>Kanallar boshqaruvi:</b>", reply_markup=channels_management_menu())
+                save_data(data)
+                return data
             
             elif text == "➕ Admin qo'shish":
                 send_message(chat_id, 
@@ -643,6 +679,8 @@ def process_message(update, data):
                     send_message(chat_id, admins_text, reply_markup=admin_menu())
                 else:
                     send_message(chat_id, "👨‍💻 Adminlar mavjud emas", reply_markup=admin_menu())
+                save_data(data)
+                return data
             
             elif text == "➕ Kanal qo'shish":
                 send_message(chat_id, 
@@ -675,11 +713,13 @@ def process_message(update, data):
                     send_message(chat_id, channels_text, reply_markup=admin_menu())
                 else:
                     send_message(chat_id, "📢 Kanallar mavjud emas", reply_markup=admin_menu())
+                save_data(data)
+                return data
 
             # Awaiting handlers for admin actions
             user_data = data['users'].get(user_id_str, {})
             
-            # Broadcast message handler - BU YERDA MUHIM
+            # Broadcast message handler
             if user_data.get('awaiting_broadcast'):
                 if text in ("Bekor qilish", "🔙 Admin paneli"):
                     user_data.pop('awaiting_broadcast', None)
@@ -687,14 +727,14 @@ def process_message(update, data):
                     save_data(data)
                 else:
                     user_data.pop('awaiting_broadcast', None)
-                    save_data(data)  # Avval saqlaymiz
+                    save_data(data)
                     
                     # Xabar turini aniqlash
                     message_data = {}
                     
                     if message.get('photo'):
                         # Rasmli xabar
-                        photo = message['photo'][-1]['file_id']  # Eng yuqori sifatli rasm
+                        photo = message['photo'][-1]['file_id']
                         caption = message.get('caption', '')
                         message_data = {
                             'type': 'photo',
@@ -797,8 +837,11 @@ def process_message(update, data):
                 save_data(data)
                 return data
 
-        # Non-admin xabarlarni adminlarga yuborish
-        if user_id not in data['admins'] and (text or message.get('photo') or message.get('document')):
+        # Non-admin xabarlarni adminlarga yuborish - FAQAT COMMAND BO'LMAGAN XABARLAR
+        if (user_id not in data['admins'] and 
+            (text or message.get('photo') or message.get('document')) and
+            not is_user_command(text)):
+            
             forwarded_messages.add(msg_identifier)
             for admin_id in data['admins']:
                 try:
