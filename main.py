@@ -438,7 +438,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
-            self.wfile.write(b'OK')
+            self.wfile.write(b'@codermrxbot ishlayapti 🚀')
         else:
             self.send_response(404)
             self.end_headers()
